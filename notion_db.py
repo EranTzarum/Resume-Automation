@@ -214,7 +214,6 @@ class NotionDB:
             props[config.PROP_EMPLOYEE_LINKEDIN] = self._url(employee_linkedin)
         if status is not None:
             props[config.PROP_STATUS] = self._select(status)
-        props[config.PROP_DATE_ADDED] = self._date_today()
         await self._request("PATCH", f"/pages/{page_id}", json_body={"properties": props})
 
     async def list_by_status(self, status: str, page_size: int = 50) -> list[dict[str, Any]]:

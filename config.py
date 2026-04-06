@@ -42,7 +42,7 @@ NOTION_DATABASE_ID: str = (os.getenv("NOTION_DATABASE_ID", "") or "").strip() or
 
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 
-ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 ANTHROPIC_API_URL: str = "https://api.anthropic.com/v1/messages"
 
@@ -76,6 +76,36 @@ STATUS_MESSAGE_SENT: str = "Message Sent"
 
 
 
+# --- Run limits ---
+
+MAX_CONNECTIONS_PER_RUN: int = 20
+
+MAX_MESSAGES_PER_RUN: int = 15
+
+MAX_EMPLOYEES_PER_COMPANY: int = 15
+
+
+
+# --- CV paths ---
+
+CV_FULLSTACK_PATH: Path = _PROJECT_ROOT / "cv_fullstack.pdf"
+
+CV_BACKEND_PATH: Path = _PROJECT_ROOT / "cv_backend.pdf"
+
+
+
+# Job titles to skip when hunting (not junior-level)
+
+JOB_TITLE_EXCLUDE_KEYWORDS: tuple[str, ...] = (
+
+    "senior", "lead", "staff", "principal", "head of", "vp ", "director",
+
+    "manager", "architect", "team lead",
+
+)
+
+
+
 # --- Dynamic CV routing: Google search query → local PDF (used for Claude match + routing) ---
 
 SEARCH_QUERY_CV_MAP: list[tuple[str, Path]] = [
@@ -99,6 +129,12 @@ SEARCH_QUERY_CV_MAP: list[tuple[str, Path]] = [
 ]
 
 
+
+# Google Custom Search JSON API (no CAPTCHA, runs headless)
+# Setup: https://programmablesearchengine.google.com/ + https://console.cloud.google.com/
+GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
+
+GOOGLE_CSE_ID: str = os.getenv("GOOGLE_CSE_ID", "")
 
 # Google: collect a pool across pages before Notion dedupe; then cap new URLs per query.
 

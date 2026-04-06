@@ -28,25 +28,26 @@ def _exclude_role(text: str) -> bool:
 
 
 class LinkedInNetworker:
-    def __init__(self) -> None:
+    def __init__(self, *, force_visible: bool = False) -> None:
         self._pw: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
+        self._force_visible = force_visible
 
     async def __aenter__(self) -> LinkedInNetworker:
-        await self.start()
+        await self.start(force_visible=self._force_visible)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
-    async def start(self) -> None:
+    async def start(self, *, force_visible: bool = False) -> None:
         self._pw = await async_playwright().start()
         state_path = Path(config.LINKEDIN_STATE_PATH)
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        launch = {"headless": config.PLAYWRIGHT_HEADLESS}
-        self._browser = await self._pw.chromium.launch(**launch)
+        headless = False if force_visible else config.PLAYWRIGHT_HEADLESS
+        self._browser = await self._pw.chromium.launch(headless=headless)
         if state_path.is_file():
             self._context = await self._browser.new_context(storage_state=str(state_path))
             logger.info("Loaded LinkedIn state from %s", state_path)
@@ -89,22 +90,30 @@ class LinkedInNetworker:
         page = self._require_page()
         await page.goto("https://www.linkedin.com/login", wait_until="domcontentloaded")
 
-    async def find_target_employee(self, company_linkedin_url: str) -> tuple[str, str] | None:
-        """Company LinkedIn /people/ — first profile not matching exclude keywords."""
+    async def find_target_employees(
+        self,
+        company_linkedin_url: str,
+        *,
+        max_count: int = 15,
+    ) -> list[tuple[str, str]]:
+        """Company LinkedIn /people/?keywords=developer — profiles not matching exclude keywords."""
         page = self._require_page()
         base = company_linkedin_url.rstrip("/")
-        people = f"{base}/people/"
+        people = f"{base}/people/?keywords=developer"
         await page.goto(people, wait_until="domcontentloaded")
         await asyncio.sleep(config.ACTION_DELAY_SEC)
         try:
             await page.wait_for_selector("a[href*='/in/']", timeout=25_000)
         except Exception:
             logger.warning("No profile links on people page (login or layout).")
-            return None
+            return []
 
         links = await page.locator("a[href*='/in/']").all()
         seen: set[str] = set()
+        results: list[tuple[str, str]] = []
         for loc in links[:100]:
+            if len(results) >= max_count:
+                break
             try:
                 href = await loc.get_attribute("href")
                 if not href or "/in/" not in href:
@@ -132,10 +141,10 @@ class LinkedInNetworker:
                     if ctx
                     else parts[1].replace("-", " ").title()
                 )
-                return name_guess, clean.rstrip("/")
+                results.append((name_guess, clean.rstrip("/")))
             except Exception:
                 continue
-        return None
+        return results
 
     async def send_connection(self, profile_url: str) -> bool:
         """Blank connection request (no note)."""
@@ -149,11 +158,16 @@ class LinkedInNetworker:
             return False
 
         try:
-            main = page.locator("main")
-            connect = main.get_by_role("button", name=re.compile(r"^\s*connect\s*$", re.I))
+            # LinkedIn uses <a> tags (not <button>) for profile actions with aria-label.
+            # "Connect" link: aria-label="Invite [Name] to connect"
+            # Take the FIRST such link (profile card is before sidebar recommendations).
+            connect = page.locator('a[aria-label*="connect" i]').first
             if await connect.count() == 0:
-                connect = page.get_by_role("button", name=re.compile(r"connect", re.I))
-            await connect.first.click(timeout=15_000)
+                logger.warning("Connect link not found on profile: %s", url)
+                return False
+
+            # Use JS click to bypass overlay/sticky nav that intercepts pointer events
+            await connect.evaluate("el => el.click()")
             await asyncio.sleep(config.ACTION_DELAY_SEC)
         except Exception:
             logger.exception("Connect button not found")
@@ -272,32 +286,52 @@ class LinkedInNetworker:
 
 async def run_followup_loop(notion: NotionDB) -> None:
     rows = await notion.list_by_status(config.STATUS_CONNECTION_SENT)
-    pdf = config.CV_PDF_PATH
-    if not pdf.is_file():
-        logger.error("CV PDF missing: %s", pdf)
-        return
+    messages_sent = 0
 
     async with LinkedInNetworker() as net:
         for row in rows:
+            if messages_sent >= config.MAX_MESSAGES_PER_RUN:
+                logger.info("Reached max messages per run (%s)", config.MAX_MESSAGES_PER_RUN)
+                break
+
             data = notion.parse_page(row)
             pid = data["page_id"] or ""
             emp_url = data["employee_linkedin"]
             if not emp_url:
                 continue
+
             try:
                 if not await net.is_connection_accepted(emp_url):
                     continue
             except Exception:
-                logger.exception("Accept check failed")
+                logger.exception("Accept check failed for %s", emp_url)
                 continue
 
-            ok = await net.send_followup(
-                profile_url=emp_url,
-                employee_name=(data["employee_name"] or "שם")[:200],
-                job_title=(data["job_title"] or "")[:500],
-                company_name=(data["company"] or "")[:500],
-                job_link=(data["job_link"] or "")[:2000],
-                pdf_path=pdf,
-            )
+            # Pick the CV that matches the job type
+            job_title_lower = (data["job_title"] or "").lower()
+            pdf_path = config.CV_BACKEND_PATH if "backend" in job_title_lower else config.CV_FULLSTACK_PATH
+            if not pdf_path.is_file():
+                logger.error("CV PDF missing: %s", pdf_path)
+                continue
+
+            try:
+                ok = await net.send_followup(
+                    profile_url=emp_url,
+                    employee_name=(data["employee_name"] or "שם")[:200],
+                    job_title=(data["job_title"] or "")[:500],
+                    company_name=(data["company"] or "")[:500],
+                    job_link=(data["job_link"] or "")[:2000],
+                    pdf_path=pdf_path,
+                )
+            except Exception:
+                logger.exception("Follow-up failed for %s", emp_url)
+                continue
+
             if ok and pid:
                 await notion.update_row(pid, status=config.STATUS_MESSAGE_SENT)
+                messages_sent += 1
+                logger.info(
+                    "Message sent to %s (%s/%s)",
+                    data["employee_name"], messages_sent, config.MAX_MESSAGES_PER_RUN,
+                )
+                await asyncio.sleep(config.ACTION_DELAY_SEC)
